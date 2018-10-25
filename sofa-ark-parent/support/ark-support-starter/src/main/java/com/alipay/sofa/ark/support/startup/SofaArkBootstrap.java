@@ -20,9 +20,8 @@ import com.alipay.sofa.ark.bootstrap.ClasspathLauncher;
 import com.alipay.sofa.ark.bootstrap.ClasspathLauncher.ClassPathArchive;
 import com.alipay.sofa.ark.common.util.AssertUtils;
 import com.alipay.sofa.ark.spi.argument.CommandArgument;
-import com.alipay.sofa.ark.support.thread.IsolatedThreadGroup;
-import com.alipay.sofa.ark.support.thread.LaunchRunner;
 
+import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLClassLoader;
 
@@ -41,21 +40,53 @@ public class SofaArkBootstrap {
     public static void launch(String[] args) {
         try {
             if (!isSofaArkStarted()) {
-                entryMethod = new EntryMethod(Thread.currentThread());
-                IsolatedThreadGroup threadGroup = new IsolatedThreadGroup(
-                    entryMethod.getDeclaringClassName());
-                LaunchRunner launchRunner = new LaunchRunner(SofaArkBootstrap.class.getName(),
-                    MAIN_ENTRY_NAME, args);
-                Thread launchThread = new Thread(threadGroup, launchRunner,
-                    entryMethod.getMethodName());
-                launchThread.start();
-                LaunchRunner.join(threadGroup);
-                threadGroup.rethrowUncaughtException();
+
+                Thread main = Thread.currentThread();
+                entryMethod = new EntryMethod(main); //  The "main" method located from a running thread.
+
+                ClassLoader classLoader = main.getContextClassLoader();
+                Class<?> startClass = classLoader.loadClass(SofaArkBootstrap.class.getName());
+
+                Method entryMethod;
+                try {
+                    entryMethod = startClass.getMethod(MAIN_ENTRY_NAME, String[].class);
+                } catch (NoSuchMethodException ex) {
+                    entryMethod = startClass.getDeclaredMethod(MAIN_ENTRY_NAME, String[].class);
+                }
+
+                if (!entryMethod.isAccessible()) {
+                    entryMethod.setAccessible(true);
+                }
+
+                entryMethod.invoke(null, new Object[] { args });
+
+                // check if there is no daemonThread
+                join(main.getThreadGroup(), main);
                 System.exit(0);
+
             }
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static void join(ThreadGroup threadGroup, Thread main) {
+        boolean hasNonDaemonThreads;
+        do {
+            hasNonDaemonThreads = false;
+            Thread[] threads = new Thread[threadGroup.activeCount()];
+            threadGroup.enumerate(threads);
+            for (Thread thread : threads) {
+                if (thread != null && !thread.isDaemon() && !thread.equals(main)) {
+                    try {
+                        hasNonDaemonThreads = true;
+                        thread.join();
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+        } while (hasNonDaemonThreads);
     }
 
     public static Object prepareContainerForTest() {
